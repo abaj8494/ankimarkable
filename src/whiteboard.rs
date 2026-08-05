@@ -11,6 +11,13 @@
 //! — so writing tracks the pen. Phase changes (Show Answer) replace `base` and
 //! recomposite with the ink kept on top; advancing to the next card clears ink.
 //!
+//! Strokes are stored in **content CSS coords** (≡ panel px at zoom 1.0): capture
+//! divides panel coords by the current zoom and adds the CSS scroll, replay does
+//! the inverse. That lets ink survive scroll AND zoom changes — it re-anchors to
+//! the CSS geometry it was written over. Accepted tradeoffs: zoom is a real
+//! reflow, so ink anchors to CSS *positions*, not to re-wrapped words; and a
+//! stroke drawn at 2× renders proportionally thin at 1×.
+//!
 //! Ink is confined to the card region (`ui::CARD_Y .. CARD_Y+CARD_H`); pen samples
 //! over the top/bottom chrome are ignored so writing never spills onto the bars.
 
@@ -24,9 +31,9 @@ const ERASE_RADIUS: i32 = 26;
 
 struct Stroke {
     erase: bool,
-    // x (panel), y in CARD-CONTENT coords (panel y − CARD_Y + scroll at capture) —
-    // so ink scrolls WITH the card: rebuild_ink maps back through the current
-    // scroll offset.
+    // (x, y, width) in content CSS coords — panel coords divided by the zoom at
+    // capture, y offset by the CSS scroll. rebuild_ink maps back through the
+    // CURRENT scroll/zoom, so ink tracks the card through both.
     pts: Vec<(i32, i32, u8)>,
 }
 
@@ -36,11 +43,10 @@ pub struct Whiteboard {
     strokes: Vec<Stroke>,
     active: Option<Stroke>,
     last: Option<(i32, i32)>,
-    /// Card scroll offset (physical px) the ink is currently rebuilt for.
-    scroll_y: i32,
-    /// True while the card is zoomed (zoom ≠ 1.0): ink is hidden and new ink
-    /// refused — strokes are anchored at 1.0 scale and would misalign.
-    zoom_hidden: bool,
+    /// Card scroll offset (CSS px) the ink is currently rebuilt for.
+    scroll: f32,
+    /// Card zoom the ink is currently rebuilt for (content CSS × zoom = panel px).
+    zoom: f32,
     // Accumulated dirty rect (x0,y0,x1,y1) pending a coalesced refresh — samples
     // ink into the framebuffer but the e-ink refresh is batched (one per input
     // drain, not one per sample), which is what keeps inking smooth.
@@ -65,8 +71,8 @@ impl Whiteboard {
             strokes: Vec::new(),
             active: None,
             last: None,
-            scroll_y: 0,
-            zoom_hidden: false,
+            scroll: 0.0,
+            zoom: 1.0,
             dirty: None,
             settle: None,
             eraser: false,
@@ -89,25 +95,21 @@ impl Whiteboard {
         &mut self.base
     }
 
-    /// The card scrolled: re-anchor the ink to the new offset (strokes are stored
-    /// in card-content coords, so this is a translate + replay).
-    pub fn set_scroll(&mut self, scroll_y: i32) {
-        if scroll_y != self.scroll_y {
-            self.scroll_y = scroll_y;
-            // A stroke can't sanely continue across a scroll step.
-            if let Some(st) = self.active.take() {
-                if !st.pts.is_empty() {
-                    self.strokes.push(st);
-                }
-            }
-            self.last = None;
-            self.rebuild_ink();
+    /// The card view scrolled and/or zoomed: re-anchor the ink to the new offset
+    /// and scale (strokes are stored in content CSS coords, so this is a replay
+    /// through the new transform).
+    pub fn set_view(&mut self, scroll_css: f32, zoom: f32) {
+        // Zoom comes from render::ZOOM_STEPS; anything non-positive would make the
+        // capture transform divide by zero (or mirror the ink).
+        debug_assert!(zoom > 0.0, "zoom must be positive (got {zoom})");
+        if (scroll_css - self.scroll).abs() < 0.01 && (zoom - self.zoom).abs() < 0.001 {
+            return;
         }
-    }
-
-    /// Hide ink + refuse new strokes while the card is zoomed (≠ 1.0).
-    pub fn set_zoom_hidden(&mut self, hidden: bool) {
-        self.zoom_hidden = hidden;
+        self.scroll = scroll_css;
+        self.zoom = zoom;
+        // A stroke can't sanely continue across a scroll/zoom change.
+        self.end_stroke();
+        self.rebuild_ink();
     }
 
     /// Drop all ink + strokes (used when advancing to the next card).
@@ -153,7 +155,7 @@ impl Whiteboard {
         for idx in 0..(WIDTH * HEIGHT) {
             let bi = idx * 4;
             let di = idx * 3;
-            let cov = if self.zoom_hidden { 0 } else { self.ink[idx] as u32 };
+            let cov = self.ink[idx] as u32;
             if cov == 0 {
                 shm[di] = self.base[bi];
                 shm[di + 1] = self.base[bi + 1];
@@ -182,7 +184,7 @@ impl Whiteboard {
         for idx in (CARD_Y * WIDTH)..((CARD_Y + CARD_H) * WIDTH) {
             let bi = idx * 4;
             let di = idx * 3;
-            let cov = if self.zoom_hidden { 0 } else { self.ink[idx] as u32 };
+            let cov = self.ink[idx] as u32;
             if cov == 0 {
                 shm[di] = self.base[bi];
                 shm[di + 1] = self.base[bi + 1];
@@ -223,12 +225,16 @@ impl Whiteboard {
             *b = 0;
         }
         let strokes = std::mem::take(&mut self.strokes);
-        let off = CARD_Y as i32 - self.scroll_y; // content y → panel y
+        let (scroll, zoom) = (self.scroll, self.zoom);
         for st in &strokes {
             let mut prev: Option<(i32, i32)> = None;
-            for &(x, cy, w) in &st.pts {
-                let y = cy + off;
-                let r = ((w as i32) / 2).max(1);
+            for &(cx, cy, w) in &st.pts {
+                // content CSS → panel px through the CURRENT scroll/zoom. Radius
+                // truncates like the capture path did, so a stroke replayed at the
+                // zoom it was drawn at is pixel-identical to its live render.
+                let x = (cx as f32 * zoom).round() as i32;
+                let y = ((cy as f32 - scroll) * zoom).round() as i32 + CARD_Y as i32;
+                let r = (((w as f32) * zoom) as i32 / 2).max(1);
                 let (fx, fy) = prev.unwrap_or((x, y));
                 // segment_ink clips to the card band per-stamp, so segments that
                 // scrolled off-window vanish cleanly.
@@ -244,10 +250,6 @@ impl Whiteboard {
     /// refresh) is what makes inking smooth: a QTFB partial-refresh per sample can't
     /// keep up with the pen's sample rate and reads as laggy/jittery.
     pub fn ink_sample(&mut self, s: PenSample, qtfb: &mut Qtfb) {
-        // Zoomed card: ink is hidden and anchored at 1.0 scale — refuse new ink.
-        if self.zoom_hidden {
-            return;
-        }
         if s.up {
             if let Some(st) = self.active.take() {
                 if !st.pts.is_empty() {
@@ -312,14 +314,17 @@ impl Whiteboard {
             }
         }
 
-        // 3. record the point in CARD-CONTENT coords (so ink scrolls with the card).
-        // Erase strokes record too — with the effective eraser width — so both
-        // scroll rebuilds and undo replay them faithfully.
+        // 3. record the point in content CSS coords (so ink scrolls AND zooms with
+        // the card). Erase strokes record too — with the effective eraser width —
+        // so both view rebuilds and undo replay them faithfully.
         {
-            let cy = y - CARD_Y as i32 + self.scroll_y;
-            let wrec = if erasing { (ERASE_RADIUS * 2) as u8 } else { s.w };
+            let zoom = self.zoom;
+            let cx = ((x as f32) / zoom).round() as i32;
+            let cy = (((y - CARD_Y as i32) as f32) / zoom + self.scroll).round() as i32;
+            let wpanel = if erasing { (ERASE_RADIUS * 2) as f32 } else { s.w as f32 };
+            let wrec = (wpanel / zoom).max(1.0) as u8;
             if let Some(st) = self.active.as_mut() {
-                st.pts.push((x, cy, wrec));
+                st.pts.push((cx, cy, wrec));
             }
         }
         self.last = Some((x, y));

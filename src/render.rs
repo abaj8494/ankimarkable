@@ -171,6 +171,12 @@ impl CardView {
         self.doc.viewport_scroll().y * scale
     }
 
+    /// Current scroll offset in CSS px (`scroll_phys` = this × zoom) — the space
+    /// whiteboard strokes are anchored in.
+    pub fn scroll_css(&self) -> f64 {
+        self.doc.viewport_scroll().y
+    }
+
     /// Maximum scroll offset in physical px (0 when the card fits the window).
     pub fn max_scroll(&self) -> f64 {
         (self.content_h() - self.height as f64).max(0.0)

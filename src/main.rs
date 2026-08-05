@@ -329,9 +329,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                         menu_open,
                                         mono,
                                     );
-                                    if v.zoom() == 1.0 {
-                                        wb.set_scroll(v.scroll_phys() as i32);
-                                    }
+                                    wb.set_view(v.scroll_css() as f32, v.zoom() as f32);
                                     wb.blit_band_fast(&mut qtfb);
                                     last_gesture = Some(Instant::now());
                                 }
@@ -348,10 +346,9 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                             if dir != 0 {
                                 if let Some(v) = view.as_mut() {
                                     if v.set_zoom_step(dir) {
-                                        wb.set_zoom_hidden(v.zoom() != 1.0);
-                                        if v.zoom() == 1.0 {
-                                            wb.set_scroll(v.scroll_phys() as i32);
-                                        }
+                                        // Re-anchor the ink to the new scroll/zoom
+                                        // BEFORE the band blit so it ships one frame.
+                                        wb.set_view(v.scroll_css() as f32, v.zoom() as f32);
                                         let mut window = v.paint_window();
                                         ui::draw_scroll_indicator(
                                             &mut window,
@@ -690,8 +687,7 @@ fn redraw(
 /// drop the live view and reset the whiteboard's scroll/zoom anchoring.
 fn invalidate_view(view: &mut Option<CardView>, wb: &mut Whiteboard) {
     *view = None;
-    wb.set_scroll(0);
-    wb.set_zoom_hidden(false);
+    wb.set_view(0.0, 1.0);
 }
 
 /// Filter the full deck tree to the rows visible given the runtime collapse state:

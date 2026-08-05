@@ -144,6 +144,20 @@ impl Pen {
         std::mem::take(&mut self.activity)
     }
 
+    /// Toggle the exclusive grab: `true` re-takes EVIOCGRAB, `false` releases it
+    /// (so another process — the scratchpad overlay — can grab the marker). No-op
+    /// when already in the wanted state. Returns the resulting grab state (`false`
+    /// if taking the grab failed, e.g. someone else currently holds it).
+    pub fn set_grab(&mut self, want: bool) -> bool {
+        if want != self.grabbed {
+            let arg: libc::c_int = if want { 1 } else { 0 };
+            if unsafe { libc::ioctl(self.fd, EVIOCGRAB, arg) } == 0 {
+                self.grabbed = want;
+            }
+        }
+        self.grabbed
+    }
+
     fn map_x(&self, raw: i32) -> i32 {
         let v = (raw.clamp(0, self.xmax) as i64 * PANEL_W as i64 / self.xmax as i64) as i32;
         if FLIP_X {

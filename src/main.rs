@@ -132,6 +132,18 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
     // STALE_IDLE while such a state is latched, we force it closed below.
     let mut last_touch: Option<Instant> = None;
     const STALE_IDLE: Duration = Duration::from_millis(2000);
+    // The fastScratch scratchpad overlay draws on top of us and needs the marker.
+    // The QTFB protocol sends NO background/focus message to external apps —
+    // rm-appload forwards only MESSAGE_USERINPUT; the MESSAGE_SYSTEM_* traffic
+    // lives on a management socket external apps never join — so this state file
+    // is the ONLY foreground signal we get. While it reports open we release the
+    // pen's exclusive EVIOCGRAB (so the overlay can ink) and drop our own pen
+    // samples. Known limitation: a DIFFERENT AppLoad app foregrounded over us is
+    // undetectable — we'd keep the grab and fight it for the marker.
+    const SCRATCHPAD_STATE: &str = "/home/root/.scratchpad-state";
+    const SCRATCH_POLL: Duration = Duration::from_millis(300);
+    let mut pen_paused = false;
+    let mut last_scratch_check: Option<Instant> = None;
 
     // Review state, populated when a deck is picked.
     let mut counts = Counts::default();
@@ -168,6 +180,31 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
         }
         if wb.is_inking() && last_pen.map_or(true, |t| t.elapsed() >= STALE_IDLE) {
             wb.end_stroke();
+        }
+        // Poll the scratchpad state file (missing/unreadable = closed). On open we
+        // release the pen grab and close any stroke the overlay interrupted (a
+        // never-ending `active` stroke would latch palm rejection on). While
+        // closed, set_grab(true) runs EVERY check — a no-op when already grabbed,
+        // but it recovers a grab lost in a race with fastScratch's own retries.
+        if last_scratch_check.map_or(true, |t| t.elapsed() >= SCRATCH_POLL) {
+            last_scratch_check = Some(Instant::now());
+            let open = std::fs::read_to_string(SCRATCHPAD_STATE)
+                .map(|s| s.split_whitespace().collect::<String>().contains("\"open\":true"))
+                .unwrap_or(false);
+            if open != pen_paused {
+                pen_paused = open;
+                if open {
+                    wb.end_stroke();
+                }
+                eprintln!(
+                    "ankimarkable: scratchpad {} — pen {}",
+                    if open { "open" } else { "closed" },
+                    if open { "released" } else { "re-grabbed" }
+                );
+            }
+            if let Some(p) = pen.as_mut() {
+                p.set_grab(!open);
+            }
         }
         // Flush any pending ink FIRST (non-blocking; keeps the dirty region if the
         // e-ink server is still busy). Retrying at the loop top means a deferred
@@ -231,42 +268,56 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
         // Pen: drain ALL samples and ink them (the refresh is flushed at the loop
         // top, coalesced and non-blocking — never per-sample, never blocking).
         if fds.len() == 2 && fds[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-            let mut inked = false;
-            let mut stroke_started = false;
-            // The PEN WINS over touch. Gating ink on `!touch.multi_active()` meant a
-            // resting palm — which reports as ≥2 card contacts — silently swallowed
-            // every sample for as long as the hand stayed down, i.e. writing simply
-            // didn't work. A palm can't be told from fingers by position, but the
-            // marker is separate hardware: if it's reporting, the hand on the glass
-            // is a palm, so ink unconditionally and cancel the phantom gesture below.
-            let r = pen.as_mut().unwrap().drain(|s| {
-                inked = true;
-                if reviewing {
-                    stroke_started |= s.down;
-                    wb.ink_sample(s, &mut qtfb);
+            if pen_paused {
+                // The scratchpad overlay owns the pen: still drain the fd (it keeps
+                // reporting to us even ungrabbed) but drop the samples and skip the
+                // last_pen/pen_hover stamping — a released pen must not trigger
+                // palm rejection against the overlay's own writing.
+                let p = pen.as_mut().unwrap();
+                let r = p.drain(|_| {});
+                let _ = p.take_activity();
+                if r.is_err() {
+                    eprintln!("ankimarkable: pen read error — dropping pen");
+                    pen = None;
                 }
-            });
-            let p = pen.as_mut().unwrap();
-            pen_hover = p.in_proximity();
-            let pen_events = p.take_activity();
-            if stroke_started {
-                // Drop whatever the palm registered before the tip landed, so it can
-                // neither latch `multi_active()` nor fire a scroll/pinch mid-stroke.
-                touch = CardTouch::new();
-            }
-            // Stamp on ANY marker traffic, hover included — the palm-rejection window
-            // must already be open when the hand lands ahead of the first ink sample.
-            if inked || pen_events {
-                last_pen = Some(Instant::now());
-            }
-            if inked && reviewing {
-                // Ship the freshly-inked pixels NOW (same iteration) rather than
-                // waiting for the next poll cycle — one less cycle of ink latency.
-                wb.flush_ink(&mut qtfb);
-            }
-            if r.is_err() {
-                eprintln!("ankimarkable: pen read error — dropping pen");
-                pen = None;
+            } else {
+                let mut inked = false;
+                let mut stroke_started = false;
+                // The PEN WINS over touch. Gating ink on `!touch.multi_active()` meant a
+                // resting palm — which reports as ≥2 card contacts — silently swallowed
+                // every sample for as long as the hand stayed down, i.e. writing simply
+                // didn't work. A palm can't be told from fingers by position, but the
+                // marker is separate hardware: if it's reporting, the hand on the glass
+                // is a palm, so ink unconditionally and cancel the phantom gesture below.
+                let r = pen.as_mut().unwrap().drain(|s| {
+                    inked = true;
+                    if reviewing {
+                        stroke_started |= s.down;
+                        wb.ink_sample(s, &mut qtfb);
+                    }
+                });
+                let p = pen.as_mut().unwrap();
+                pen_hover = p.in_proximity();
+                let pen_events = p.take_activity();
+                if stroke_started {
+                    // Drop whatever the palm registered before the tip landed, so it can
+                    // neither latch `multi_active()` nor fire a scroll/pinch mid-stroke.
+                    touch = CardTouch::new();
+                }
+                // Stamp on ANY marker traffic, hover included — the palm-rejection window
+                // must already be open when the hand lands ahead of the first ink sample.
+                if inked || pen_events {
+                    last_pen = Some(Instant::now());
+                }
+                if inked && reviewing {
+                    // Ship the freshly-inked pixels NOW (same iteration) rather than
+                    // waiting for the next poll cycle — one less cycle of ink latency.
+                    wb.flush_ink(&mut qtfb);
+                }
+                if r.is_err() {
+                    eprintln!("ankimarkable: pen read error — dropping pen");
+                    pen = None;
+                }
             }
         }
 

@@ -312,12 +312,18 @@ impl Backend {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        // Matches anki's default web client.
-        let client = reqwest::Client::builder().http1_only().build()?;
-        let auth = rt.block_on(sync_login(username, password, None, client.clone()))?;
+        // Matches anki's default web client. `.no_proxy()` because reqwest honours
+        // HTTP(S)_PROXY env vars by default — a proxy inherited from the launching
+        // shell/appload env would silently reroute AnkiWeb traffic and fail.
+        let client = reqwest::Client::builder().http1_only().no_proxy().build()?;
+        let auth = rt
+            .block_on(sync_login(username, password, None, client.clone()))
+            .map_err(describe_sync_error)?;
 
         // 1) Collection sync.
-        let out = rt.block_on(self.col().normal_sync(auth.clone(), client.clone()))?;
+        let out = rt
+            .block_on(self.col().normal_sync(auth.clone(), client.clone()))
+            .map_err(describe_sync_error)?;
         let status = match out.required {
             SyncActionRequired::NoChanges => "up to date",
             SyncActionRequired::NormalSyncRequired => "synced",
@@ -342,7 +348,7 @@ impl Backend {
                     let col = self.col.take().expect("collection is open");
                     let res = rt.block_on(col.full_download(dl_auth, client.clone()));
                     self.reopen()?;
-                    res?;
+                    res.map_err(describe_sync_error)?;
                     "downloaded"
                 } else {
                     return Ok("full sync needs upload — resolve on desktop".to_string());
@@ -353,9 +359,24 @@ impl Backend {
         // 2) Media (card images/audio) — synced after the collection is settled.
         let mgr = self.col().media()?;
         let progress = self.col().new_progress_handler::<MediaSyncProgress>();
-        rt.block_on(mgr.sync_media(progress, auth, client, None))?;
+        rt.block_on(mgr.sync_media(progress, auth, client, None))
+            .map_err(describe_sync_error)?;
 
         Ok(status.to_string())
+    }
+}
+
+/// Convert a concrete `AnkiError` into an anyhow error that actually says what
+/// went wrong. snafu's derived Display on `AnkiError::NetworkError` prints just
+/// the bare variant name ("NetworkError"), swallowing the inner kind + info —
+/// so a DNS failure, a timeout and an auth-proxy 407 all surface identically.
+/// Pull the inner fields out here, before `?` erases the type into anyhow.
+fn describe_sync_error(e: anki::error::AnkiError) -> anyhow::Error {
+    use anki::error::AnkiError as E;
+    match &e {
+        E::NetworkError { source } => anyhow::anyhow!("network {:?}: {}", source.kind, source.info),
+        E::SyncError { source } => anyhow::anyhow!("sync {:?}: {}", source.kind, source.info),
+        _ => anyhow::anyhow!("{e:?}"),
     }
 }
 

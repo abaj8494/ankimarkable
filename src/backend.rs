@@ -91,6 +91,8 @@ pub struct ReviewCard {
     pub card_id: CardId,
     /// The card's note id (for the ⋮ menu's "Suspend note" action).
     pub note_id: i64,
+    /// Anki flag 0-7 (0 = none) — shown in the ⋮ menu and updated by `set_flag`.
+    pub flags: u8,
     pub kind: CardKind,
     pub question_html: String,
     pub answer_html: String,
@@ -229,6 +231,9 @@ impl Backend {
             return Ok(None);
         };
         let cid = qc.card.id();
+        // rslib keeps `Card::flags` pub(crate); the proto conversion is the public
+        // window onto it. Only the low 3 bits are the flag (0-7).
+        let flags = (anki_proto::cards::Card::from(qc.card.clone()).flags & 0b111) as u8;
         let kind = match qc.card.queue_number() {
             CardQueueNumber::New => CardKind::New,
             CardQueueNumber::Learning => CardKind::Learning,
@@ -253,6 +258,7 @@ impl Backend {
         Ok(Some(ReviewCard {
             card_id: cid,
             note_id: qc.card.note_id().0,
+            flags,
             kind,
             question_html: question,
             answer_html: answer,
@@ -285,6 +291,13 @@ impl Backend {
         if !cids.is_empty() {
             self.col().bury_or_suspend_cards(&cids, BuryMode::Suspend)?;
         }
+        Ok(())
+    }
+
+    /// Set (1-7) or clear (0) a card's flag (⋮ menu → Flag…). Runs as Op::SetFlag,
+    /// which is undoable like a grade.
+    pub fn set_flag(&mut self, cid: CardId, flag: u32) -> Result<()> {
+        self.col().set_card_flag(&[cid], flag)?;
         Ok(())
     }
 

@@ -26,12 +26,43 @@ const SYNC_W: usize = 190;
 const EXIT_W: usize = 160;
 
 // ⋮ overflow menu: a floating button in the card's bottom-right corner, with a
-// popup panel above it (Bury card / Suspend note).
+// popup panel above it (root actions, or the Flag… submenu).
 pub const MENU_BTN: usize = 104;
 const MENU_GAP: usize = 30; // inset from the right edge / bottom action bar
 const MENU_PANEL_W: usize = 520;
 const MENU_ITEM_H: usize = 118;
-const MENU_ITEMS: usize = 2;
+
+/// Which ⋮ panel is showing (`Closed` = none).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MenuState {
+    Closed,
+    Root,
+    Flags,
+}
+
+/// Anki's seven card flags: (flag number, name, swatch colour). Single source of
+/// truth — BOTH the Flags panel's HTML rows and hit_menu's row indices derive
+/// from this table (in this order), so the drawn rows and the hit-test rows
+/// cannot drift.
+const FLAGS: [(u32, &str, &str); 7] = [
+    (1, "Red", "#d32f2f"),
+    (2, "Orange", "#f57c00"),
+    (3, "Green", "#388e3c"),
+    (4, "Blue", "#1976d2"),
+    (5, "Pink", "#e91e63"),
+    (6, "Turquoise", "#00bcd4"),
+    (7, "Purple", "#7b1fa2"),
+];
+
+/// Rows in the panel for a given state. Root: Flag… / Bury card / Suspend note.
+/// Flags: the seven flags + Remove flag.
+fn menu_items(state: MenuState) -> usize {
+    match state {
+        MenuState::Closed => 0,
+        MenuState::Root => 3,
+        MenuState::Flags => FLAGS.len() + 1,
+    }
+}
 
 fn menu_btn_rect() -> (usize, usize, usize, usize) {
     let x1 = WIDTH - MENU_GAP;
@@ -41,26 +72,42 @@ fn menu_btn_rect() -> (usize, usize, usize, usize) {
     (x0, y0, x1, y1)
 }
 
-fn menu_panel_rect() -> (usize, usize, usize, usize) {
+fn menu_panel_rect(items: usize) -> (usize, usize, usize, usize) {
     let (_, by0, bx1, _) = menu_btn_rect();
     let x1 = bx1;
     let x0 = x1 - MENU_PANEL_W;
     let y1 = by0 - 14;
-    let y0 = y1 - MENU_ITEM_H * MENU_ITEMS;
+    // Even the tallest panel (8 × 118px = 944px) starts at y0 = 828, well below
+    // CARD_Y (110) — it always fits inside the card band above the anchor.
+    let y0 = y1 - MENU_ITEM_H * items;
     (x0, y0, x1, y1)
 }
 
 /// Hit-test a tap while the ⋮ menu is open: a panel item, else None (dismiss).
-pub fn hit_menu(x: i32, y: i32) -> MenuHit {
+/// Row indices are matched exhaustively per state — no catch-all mapping — so a
+/// tap outside the drawn rows can never fire an action.
+pub fn hit_menu(x: i32, y: i32, state: MenuState) -> MenuHit {
     if x < 0 || y < 0 {
         return MenuHit::None;
     }
     let (x, y) = (x as usize, y as usize);
-    let (px0, py0, px1, py1) = menu_panel_rect();
+    let (px0, py0, px1, py1) = menu_panel_rect(menu_items(state));
     if x >= px0 && x < px1 && y >= py0 && y < py1 {
-        return match (y - py0) / MENU_ITEM_H {
-            0 => MenuHit::Bury,
-            _ => MenuHit::Suspend,
+        let row = (y - py0) / MENU_ITEM_H;
+        return match state {
+            MenuState::Closed => MenuHit::None,
+            MenuState::Root => match row {
+                0 => MenuHit::OpenFlags,
+                1 => MenuHit::Bury,
+                2 => MenuHit::Suspend,
+                _ => MenuHit::None,
+            },
+            // Same order as draw_menu_panel: the FLAGS rows, then Remove flag.
+            MenuState::Flags => match row {
+                r if r < FLAGS.len() => MenuHit::Flag(FLAGS[r].0),
+                r if r == FLAGS.len() => MenuHit::Flag(0),
+                _ => MenuHit::None,
+            },
         };
     }
     MenuHit::None
@@ -103,8 +150,12 @@ pub enum Hit {
 /// A tap while the ⋮ overflow menu is open.
 #[derive(Clone, Copy, Debug)]
 pub enum MenuHit {
+    /// Root row "Flag…" — switch the panel to the flags submenu (stays open).
+    OpenFlags,
     Bury,
     Suspend,
+    /// A flags-submenu row: 1-7 sets that flag, 0 = "Remove flag".
+    Flag(u32),
     /// Tapped outside the panel — dismiss it.
     None,
 }
@@ -216,7 +267,7 @@ pub fn compose_review(
     counts: Counts,
     status: &str,
     eraser: bool,
-    menu_open: bool,
+    menu: MenuState,
     mono: bool,
 ) -> Vec<u8> {
     let mut fb = vec![255u8; WIDTH * HEIGHT * 4];
@@ -240,8 +291,8 @@ pub fn compose_review(
     // ⋮ overflow button (always) + its popup panel (when open), drawn last so they
     // sit on top of the card.
     draw_menu_button(&mut fb, renderer);
-    if menu_open {
-        draw_menu_panel(&mut fb, renderer);
+    if menu != MenuState::Closed {
+        draw_menu_panel(&mut fb, renderer, menu, card.flags);
     }
     // Black-and-white mode: desaturate the WHOLE composed frame (card + chrome) so
     // the toggle is unmistakable even on an already-monochrome card.
@@ -259,7 +310,8 @@ pub fn patch_card_band(
     fb: &mut [u8],
     card_window: &[u8],
     renderer: &Renderer,
-    menu_open: bool,
+    menu: MenuState,
+    current_flag: u8,
     mono: bool,
 ) {
     // Reset the band to white, then alpha-composite the window (matches the
@@ -270,8 +322,8 @@ pub fn patch_card_band(
     }
     blit(fb, card_window, WIDTH, CARD_H, 0, CARD_Y);
     draw_menu_button(fb, renderer);
-    if menu_open {
-        draw_menu_panel(fb, renderer);
+    if menu != MenuState::Closed {
+        draw_menu_panel(fb, renderer, menu, current_flag);
     }
     if mono {
         desaturate(&mut fb[CARD_Y * WIDTH * 4..(CARD_Y + CARD_H) * WIDTH * 4]);
@@ -326,22 +378,60 @@ fn draw_menu_button(fb: &mut [u8], renderer: &Renderer) {
     blit(fb, &buf, MENU_BTN, MENU_BTN, x0, y0);
 }
 
-/// The popup panel above the ⋮ button: Bury card / Suspend note.
-fn draw_menu_panel(fb: &mut [u8], renderer: &Renderer) {
-    let (x0, y0, x1, y1) = menu_panel_rect();
+/// The popup panel above the ⋮ button. Root: Flag… / Bury card / Suspend note;
+/// Flags: one row per `FLAGS` entry (colour swatch + "{n} {Name}", ✓ + bold on
+/// the current flag) then "Remove flag". Row ORDER must match `hit_menu` — both
+/// are generated from the same `FLAGS` table.
+fn draw_menu_panel(fb: &mut [u8], renderer: &Renderer, state: MenuState, current_flag: u8) {
+    let items = menu_items(state);
+    if items == 0 {
+        return;
+    }
+    let (x0, y0, x1, y1) = menu_panel_rect(items);
     let (w, h) = (x1 - x0, y1 - y0);
+    let mut rows = String::new();
+    match state {
+        MenuState::Closed => return,
+        MenuState::Root => {
+            // Surface the current flag on the submenu row so you can see the
+            // card's flag without opening it.
+            let flag_row = match FLAGS.iter().find(|f| f.0 == current_flag as u32) {
+                Some((_, name, _)) => format!("Flag\u{2026} ({name}) \u{25B8}"),
+                None => "Flag\u{2026} \u{25B8}".to_string(),
+            };
+            rows.push_str(&format!("<div class=\"it sep\">{flag_row}</div>"));
+            rows.push_str("<div class=\"it sep\">Bury card</div>");
+            rows.push_str("<div class=\"it\">Suspend note</div>");
+        }
+        MenuState::Flags => {
+            for &(n, name, hex) in FLAGS.iter() {
+                let (cur, tick) = if n == current_flag as u32 {
+                    (" cur", " \u{2713}")
+                } else {
+                    ("", "")
+                };
+                rows.push_str(&format!(
+                    "<div class=\"it sep{cur}\"><span class=\"sw\" \
+                     style=\"background:{hex};\"></span>{n} {name}{tick}</div>"
+                ));
+            }
+            rows.push_str("<div class=\"it\">Remove flag</div>");
+        }
+    }
     let html = format!(
         "<!DOCTYPE html><html><head><style>body{{margin:0;padding:0;}}\
          .p{{width:{w}px;height:{h}px;background:#fff;border:3px solid #333;box-sizing:border-box;}}\
          .it{{height:{ih}px;display:flex;align-items:center;padding-left:36px;\
          font-size:46px;color:#111;box-sizing:border-box;}}\
-         .top{{border-bottom:2px solid #cccccc;}}</style></head>\
-         <body><div class=\"p\">\
-         <div class=\"it top\">Bury card</div>\
-         <div class=\"it\">Suspend note</div></div></body></html>",
+         .sep{{border-bottom:2px solid #cccccc;}}\
+         .cur{{font-weight:700;}}\
+         .sw{{display:inline-block;width:34px;height:34px;flex:none;\
+         border:2px solid #888;margin-right:26px;}}</style></head>\
+         <body><div class=\"p\">{rows}</div></body></html>",
         w = w,
         h = h,
-        ih = MENU_ITEM_H
+        ih = MENU_ITEM_H,
+        rows = rows,
     );
     let buf = renderer.render_rgba(&html, w as u32, h as u32);
     blit(fb, &buf, w, h, x0, y0);
@@ -363,7 +453,17 @@ pub fn draw_review(
         Phase::Answer => &card.answer_html,
     };
     let window = renderer.render_rgba(html, WIDTH as u32, CARD_H as u32);
-    let fb = compose_review(renderer, &window, card, phase, counts, status, eraser, false, false);
+    let fb = compose_review(
+        renderer,
+        &window,
+        card,
+        phase,
+        counts,
+        status,
+        eraser,
+        MenuState::Closed,
+        false,
+    );
     qtfb.blit_rgba(&fb, WIDTH, HEIGHT, 0, 0);
     let _ = qtfb.set_refresh_mode(REFRESH_MODE_CONTENT);
     let _ = qtfb.update_full();

@@ -155,10 +155,10 @@ fn main() -> anyhow::Result<()> {
     match be.next_card()? {
         Some(card) => {
             let qwin = r.render_rgba(&card.question_html, ui::WIDTH as u32, ui::CARD_H as u32);
-            let q = ui::compose_review(&r, &qwin, &card, Phase::Question, counts, "ready", false, false, false);
+            let q = ui::compose_review(&r, &qwin, &card, Phase::Question, counts, "ready", false, ui::MenuState::Closed, false);
             save_png("/home/root/screen_q.png", &q, ui::WIDTH, ui::HEIGHT)?;
             let awin = r.render_rgba(&card.answer_html, ui::WIDTH as u32, ui::CARD_H as u32);
-            let a = ui::compose_review(&r, &awin, &card, Phase::Answer, counts, "ready", false, false, false);
+            let a = ui::compose_review(&r, &awin, &card, Phase::Answer, counts, "ready", false, ui::MenuState::Closed, false);
             save_png("/home/root/screen_a.png", &a, ui::WIDTH, ui::HEIGHT)?;
             println!("buttons: {:?}", card.button_labels);
         }

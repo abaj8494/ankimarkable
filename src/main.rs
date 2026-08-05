@@ -19,7 +19,7 @@ use ankimarkable::qtfb::{
     Qtfb, INPUT_TOUCH_PRESS, INPUT_TOUCH_RELEASE, INPUT_TOUCH_UPDATE, REFRESH_MODE_CONTENT,
 };
 use ankimarkable::render::{CardView, Renderer};
-use ankimarkable::ui::{self, Hit, HomeHit, Phase};
+use ankimarkable::ui::{self, Hit, HomeHit, MenuState, Phase};
 use ankimarkable::whiteboard::Whiteboard;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -136,7 +136,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
     // Review state, populated when a deck is picked.
     let mut counts = Counts::default();
     let mut current: Option<backend::ReviewCard> = None;
-    let mut menu_open = false; // ⋮ overflow menu (Bury card / Suspend note)
+    let mut menu = MenuState::Closed; // ⋮ overflow menu (Flag… / Bury / Suspend)
     let mut mono = false; // false = colour card rendering, true = black-and-white
     // Live scrollable/zoomable card document (None until a card is shown).
     let mut view: Option<CardView> = None;
@@ -307,7 +307,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
             last_touch = Some(Instant::now());
 
             // ── Review-screen gesture routing (menu-open taps skip to hit_menu) ──
-            if reviewing && !menu_open {
+            if reviewing && menu == MenuState::Closed {
                 let in_card = ui::in_card_region(ev.x, ev.y);
                 if in_card || touch.is_tracked(ev.dev_id) || touch.multi_active() {
                     let fed = touch.feed(ty, ev.dev_id, ev.x, ev.y, in_card);
@@ -326,7 +326,8 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                         wb.base_mut(),
                                         &window,
                                         &renderer,
-                                        menu_open,
+                                        menu,
+                                        current.as_ref().map_or(0, |c| c.flags),
                                         mono,
                                     );
                                     wb.set_view(v.scroll_css() as f32, v.zoom() as f32);
@@ -360,7 +361,8 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                             wb.base_mut(),
                                             &window,
                                             &renderer,
-                                            menu_open,
+                                            menu,
+                                            current.as_ref().map_or(0, |c| c.flags),
                                             mono,
                                         );
                                         // Fast feedback now; the queued colour settle
@@ -401,7 +403,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         wb.clear_ink();
                         invalidate_view(&mut view, &mut wb);
                         screen = Screen::Review;
-                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                     }
                 }
                 HomeHit::Toggle(i) => {
@@ -482,17 +484,32 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                 HomeHit::None => {}
             },
             // While the ⋮ menu is open, taps hit its items (or dismiss it).
-            Screen::Review if menu_open => {
-                let act = ui::hit_menu(ev.x, ev.y);
-                menu_open = false;
-                let advanced = match act {
+            Screen::Review if menu != MenuState::Closed => {
+                let act = ui::hit_menu(ev.x, ev.y, menu);
+                let mut advanced = false;
+                match act {
+                    // Switch to the Flags submenu — the panel STAYS open.
+                    ui::MenuHit::OpenFlags => menu = MenuState::Flags,
+                    ui::MenuHit::Flag(n) => {
+                        // Deliberately NON-advancing: you flag a card and keep
+                        // reviewing it. Op::SetFlag is undoable, so the Undo
+                        // button undoes a flag before a grade — matches Anki.
+                        if let Some(card) = current.as_mut() {
+                            match backend.set_flag(card.card_id, n) {
+                                Ok(()) => card.flags = n as u8,
+                                Err(e) => status = format!("flag error: {e}"),
+                            }
+                        }
+                        menu = MenuState::Closed;
+                    }
                     ui::MenuHit::Bury => {
                         if let Some(card) = &current {
                             if let Err(e) = backend.bury_card(card.card_id) {
                                 status = format!("bury error: {e}");
                             }
                         }
-                        true
+                        advanced = true;
+                        menu = MenuState::Closed;
                     }
                     ui::MenuHit::Suspend => {
                         if let Some(card) = &current {
@@ -500,10 +517,12 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                 status = format!("suspend error: {e}");
                             }
                         }
-                        true
+                        advanced = true;
+                        menu = MenuState::Closed;
                     }
-                    ui::MenuHit::None => false, // tapped outside → just dismiss
-                };
+                    // Tapped outside → just dismiss.
+                    ui::MenuHit::None => menu = MenuState::Closed,
+                }
                 if advanced {
                     counts = backend.counts().unwrap_or_default();
                     current = backend.next_card().unwrap_or(None);
@@ -511,7 +530,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     wb.clear_ink();
                     invalidate_view(&mut view, &mut wb);
                 }
-                redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
             }
             Screen::Review => match ui::hit_test(ev.x, ev.y, phase) {
                 Hit::Exit => break 'main,
@@ -559,14 +578,14 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     phase = Phase::Question;
                     wb.clear_ink();
                     invalidate_view(&mut view, &mut wb);
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                 }
                 Hit::ShowAnswer => {
                     if current.is_some() && phase == Phase::Question {
                         phase = Phase::Answer;
                         invalidate_view(&mut view, &mut wb);
                         // Keep ink so you can compare your answer against the card.
-                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                     }
                 }
                 Hit::Grade(g) => {
@@ -582,7 +601,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         phase = Phase::Question;
                         wb.clear_ink(); // next card starts on a clean whiteboard
                         invalidate_view(&mut view, &mut wb);
-                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                     }
                 }
                 Hit::Undo => {
@@ -599,7 +618,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                 invalidate_view(&mut view, &mut wb);
                                 redraw(
                                     &mut qtfb, &renderer, &mut wb, &current, &mut view, phase,
-                                    counts, &status, menu_open, mono,
+                                    counts, &status, menu, mono,
                                 );
                             }
                             _ => {} // nothing to undo
@@ -610,17 +629,17 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                 Hit::EraserToggle => {
                     wb.toggle_eraser();
                     // Recompose so the toolbar reflects the toggle; ink is kept.
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                 }
                 Hit::Menu => {
-                    // Open the ⋮ overflow menu (Bury card / Suspend note).
-                    menu_open = true;
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                    // Open the ⋮ overflow menu (Flag… / Bury card / Suspend note).
+                    menu = MenuState::Root;
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                 }
                 Hit::ColorToggle => {
                     // Tap the counts (top-left) to flip colour / black-and-white.
                     mono = !mono;
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu_open, mono);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
                 }
                 Hit::None => {}
             },
@@ -648,7 +667,7 @@ fn redraw(
     phase: Phase,
     counts: Counts,
     status: &str,
-    menu_open: bool,
+    menu: MenuState,
     mono: bool,
 ) {
     let eraser = wb.eraser;
@@ -666,7 +685,7 @@ fn redraw(
             let mut window = v.paint_window();
             ui::draw_scroll_indicator(&mut window, v.scroll_phys(), v.max_scroll(), v.content_h());
             ui::compose_review(
-                renderer, &window, card, phase, counts, status, eraser, menu_open, mono,
+                renderer, &window, card, phase, counts, status, eraser, menu, mono,
             )
         }
         // Keep the top menu bar so Home / Sync / Exit still work (an empty deck or

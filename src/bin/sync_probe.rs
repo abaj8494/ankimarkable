@@ -24,7 +24,15 @@ fn main() -> anyhow::Result<()> {
 
     let mut be = Backend::open(&col)?;
     match be.sync(user.trim(), pass.trim()) {
-        Ok(s) => println!("sync OK: {s}"),
+        Ok(r) => {
+            println!("sync OK: {}", r.headline);
+            for line in [&r.added, &r.removed, &r.media, &r.server_message]
+                .into_iter()
+                .flatten()
+            {
+                println!("  {line}");
+            }
+        }
         Err(e) => println!("sync FAILED: {e:#}  ||  debug: {e:?}"),
     }
     Ok(())

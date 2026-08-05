@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
         let mut l = creds.lines();
         if let (Some(u), Some(p)) = (l.next(), l.next()) {
             match be.sync(u.trim(), p.trim()) {
-                Ok(s) => println!("sync: {s}"),
+                Ok(r) => println!("sync: {}", r.headline),
                 Err(e) => println!("sync FAILED: {e:#}  ||  debug: {e:?}"),
             }
         } else {

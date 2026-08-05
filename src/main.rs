@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use ankimarkable::backend::{self, Backend, Counts, DeckInfo, Stats};
+use ankimarkable::backend::{self, Backend, Counts, DeckInfo, Stats, SyncReport};
 use ankimarkable::gesture::{CardGesture, CardTouch};
 use ankimarkable::pen::Pen;
 use ankimarkable::qtfb::{
@@ -454,11 +454,25 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         "Syncing…",
                         "Contacting AnkiWeb — this can take a moment.",
                     );
-                    let s = do_sync(&mut backend);
+                    let report = do_sync(&mut backend);
+                    let body = sync_report_body(&report);
+                    eprintln!(
+                        "ankimarkable: sync from home: {} | {}",
+                        report.headline,
+                        body.replace('\n', " | ")
+                    );
+                    // Hold the report on screen until acknowledged — the counts
+                    // are the only feedback that the sync actually moved cards.
+                    let msg = if body.is_empty() {
+                        "Tap anywhere to continue.".to_string()
+                    } else {
+                        format!("{body}\n\nTap anywhere to continue.")
+                    };
+                    ui::draw_message(&mut qtfb, &renderer, &report.headline, &msg);
+                    wait_for_tap(&mut qtfb);
                     all_decks = backend.deck_infos().unwrap_or_default();
                     visible = visible_decks(&all_decks, &collapsed);
                     clamp_scroll(&mut scroll, visible.len());
-                    eprintln!("ankimarkable: sync from home: {s}");
                     ui::draw_home(
                         &mut qtfb,
                         &renderer,
@@ -528,7 +542,21 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         "Syncing…",
                         "Contacting AnkiWeb — this can take a moment.",
                     );
-                    status = do_sync(&mut backend);
+                    let report = do_sync(&mut backend);
+                    let body = sync_report_body(&report);
+                    eprintln!(
+                        "ankimarkable: sync from review: {} | {}",
+                        report.headline,
+                        body.replace('\n', " | ")
+                    );
+                    let msg = if body.is_empty() {
+                        "Tap anywhere to continue.".to_string()
+                    } else {
+                        format!("{body}\n\nTap anywhere to continue.")
+                    };
+                    ui::draw_message(&mut qtfb, &renderer, &report.headline, &msg);
+                    wait_for_tap(&mut qtfb);
+                    status = report.headline;
                     counts = backend.counts().unwrap_or_default();
                     current = backend.next_card().unwrap_or(None);
                     phase = Phase::Question;
@@ -714,21 +742,44 @@ fn home_stats(base: Stats, session_reviews: u32) -> Stats {
 }
 
 /// Read AnkiWeb credentials from `DATA_DIR/ankiweb.txt` (line 1 = email/user,
-/// line 2 = password) and run a sync. Returns a short status for the chrome.
-fn do_sync(backend: &mut Backend) -> String {
+/// line 2 = password) and run a sync. Error/credential problems come back as a
+/// report whose headline is the message (details all None).
+fn do_sync(backend: &mut Backend) -> SyncReport {
     let creds_path = format!("{DATA_DIR}/ankiweb.txt");
     let raw = match std::fs::read_to_string(&creds_path) {
         Ok(s) => s,
-        Err(_) => return "no AnkiWeb creds (ankiweb.txt)".to_string(),
+        Err(_) => {
+            return SyncReport {
+                headline: "no AnkiWeb creds (ankiweb.txt)".to_string(),
+                ..Default::default()
+            }
+        }
     };
     let mut lines = raw.lines();
     let (Some(user), Some(pass)) = (lines.next(), lines.next()) else {
-        return "ankiweb.txt needs user + pass lines".to_string();
+        return SyncReport {
+            headline: "ankiweb.txt needs user + pass lines".to_string(),
+            ..Default::default()
+        };
     };
     match backend.sync(user.trim(), pass.trim()) {
-        Ok(s) => s,
-        Err(e) => format!("sync failed: {e}"),
+        Ok(r) => r,
+        Err(e) => SyncReport {
+            headline: format!("sync failed: {e}"),
+            ..Default::default()
+        },
     }
+}
+
+/// The Some-detail lines of a sync report, newline-joined for the message body
+/// (and `|`-joined for logging). Empty when the sync had nothing to say.
+fn sync_report_body(r: &SyncReport) -> String {
+    [&r.added, &r.removed, &r.media, &r.server_message]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn wait_for_exit(qtfb: &Qtfb) {
@@ -739,6 +790,23 @@ fn wait_for_exit(qtfb: &Qtfb) {
                     if let Hit::Exit = ui::hit_test(ev.x, ev.y, Phase::Question) {
                         break;
                     }
+                }
+            }
+            Ok(None) => continue,
+            Err(_) => break,
+        }
+    }
+}
+
+/// Block on a "tap anywhere to continue" screen: returns on any touch press (or
+/// shutdown). UPDATE/RELEASE are ignored; the pen fd isn't polled here — its
+/// samples just queue and get drained on the next main-loop iteration.
+fn wait_for_tap(qtfb: &mut Qtfb) {
+    while RUNNING.load(Ordering::SeqCst) {
+        match qtfb.poll_input() {
+            Ok(Some(ev)) => {
+                if ev.input_type == INPUT_TOUCH_PRESS {
+                    break;
                 }
             }
             Ok(None) => continue,

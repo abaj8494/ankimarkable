@@ -61,6 +61,20 @@ pub struct Stats {
     pub reviewed_today: u32,
 }
 
+/// What a sync actually did, for the post-sync message screen. `headline` is a
+/// short status ("synced" / "up to date" / …) that also fits the top-bar status
+/// div; the Option lines are pre-localized detail strings from rslib's progress
+/// (e.g. "Added/modified: ↑3 ↓12") — None when a stage didn't run or reported
+/// nothing.
+#[derive(Default)]
+pub struct SyncReport {
+    pub headline: String,
+    pub added: Option<String>,
+    pub removed: Option<String>,
+    pub media: Option<String>,
+    pub server_message: Option<String>,
+}
+
 /// Which queue the current card came from — drives the underline under the
 /// matching top-bar count (new = blue, learning/redo = red, review = green).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,7 +322,8 @@ impl Backend {
     /// never auto-*upload* (that could clobber AnkiWeb), so an upload-only full sync
     /// is surfaced for the user to resolve on desktop. This is what lets a stale or
     /// freshly-provisioned device fetch the `uni` deck on first sync.
-    pub fn sync(&mut self, username: &str, password: &str) -> Result<String> {
+    pub fn sync(&mut self, username: &str, password: &str) -> Result<SyncReport> {
+        use anki::services::CollectionService; // for latest_progress()
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -324,6 +339,21 @@ impl Backend {
         let out = rt
             .block_on(self.col().normal_sync(auth.clone(), client.clone()))
             .map_err(describe_sync_error)?;
+        let mut report = SyncReport::default();
+        if !out.server_message.is_empty() {
+            report.server_message = Some(out.server_message.clone());
+        }
+        // Grab the collection-sync counts NOW: rslib only exposes them through a
+        // single shared progress slot, and the media sync below overwrites it.
+        // The pre-localized `added`/`removed` lines ("Added/modified: ↑x ↓y") are
+        // exactly what the desktop shows. On NoChanges the slot may hold some
+        // other variant — the match just leaves the fields None.
+        if let Ok(p) = self.col().latest_progress() {
+            if let Some(anki_proto::collection::progress::Value::NormalSync(ns)) = p.value {
+                report.added = Some(ns.added);
+                report.removed = Some(ns.removed);
+            }
+        }
         let status = match out.required {
             SyncActionRequired::NoChanges => "up to date",
             SyncActionRequired::NormalSyncRequired => "synced",
@@ -349,9 +379,14 @@ impl Backend {
                     let res = rt.block_on(col.full_download(dl_auth, client.clone()));
                     self.reopen()?;
                     res.map_err(describe_sync_error)?;
+                    // The normal-sync counts captured above are moot — the whole
+                    // collection was replaced, not incrementally merged.
+                    report.added = None;
+                    report.removed = None;
                     "downloaded"
                 } else {
-                    return Ok("full sync needs upload — resolve on desktop".to_string());
+                    report.headline = "full sync needs upload — resolve on desktop".to_string();
+                    return Ok(report);
                 }
             }
         };
@@ -361,8 +396,16 @@ impl Backend {
         let progress = self.col().new_progress_handler::<MediaSyncProgress>();
         rt.block_on(mgr.sync_media(progress, auth, client, None))
             .map_err(describe_sync_error)?;
+        // The slot now holds the media stage's final (pre-localized) lines:
+        // "Checked: n" / "Added: ↑x ↓y" / "Removed: ↑x ↓y" — fold into one line.
+        if let Ok(p) = self.col().latest_progress() {
+            if let Some(anki_proto::collection::progress::Value::MediaSync(ms)) = p.value {
+                report.media = Some(format!("media: {} · {} · {}", ms.checked, ms.added, ms.removed));
+            }
+        }
 
-        Ok(status.to_string())
+        report.headline = status.to_string();
+        Ok(report)
     }
 }
 

@@ -415,7 +415,9 @@ pub fn compose_message(renderer: &Renderer, title: &str, body: &str) -> Vec<u8> 
          .b{{font-size:36px;color:#444;line-height:1.5;max-width:1100px;}}</style></head>\
          <body><div class=\"t\">{}</div><div class=\"b\">{}</div></body></html>",
         esc(title),
-        esc(body)
+        // Callers pass multi-line bodies (e.g. the sync report); esc() keeps the
+        // '\n's literal, so turn them into <br> AFTER escaping.
+        esc(body).replace('\n', "<br>")
     );
     renderer.render_rgba(&html, WIDTH as u32, HEIGHT as u32)
 }
@@ -655,7 +657,7 @@ fn top_bar_html(counts: Counts, kind: Option<CardKind>, status: &str, eraser: bo
          .r{{color:#2e7d32;font-weight:700;}} \
          .und{{border-bottom:7px solid;}}\
          .status{{font-size:24px;color:#666;padding-right:20px;\
-         overflow:hidden;text-overflow:ellipsis;max-width:360px;}}\
+         overflow:hidden;text-overflow:ellipsis;max-width:560px;}}\
          .btn{{font-size:30px;font-weight:700;text-align:center;color:#fff;\
          height:{top}px;display:flex;align-items:center;justify-content:center;\
          border-left:2px solid #fff;}}\

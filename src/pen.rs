@@ -39,8 +39,11 @@ const FALLBACK_XMAX: i32 = 11180;
 const FALLBACK_YMAX: i32 = 15340;
 const PRESSURE_MAX: i32 = 4096;
 
-// Axis orientation. The marker origin matches the panel's on the rMPP; flip
+// Base axis orientation. The marker origin matches the panel's on the rMPP; flip
 // constants are here so a live test can correct an inverted axis with one edit.
+// The runtime `flip180` (both axes together) is separate: it mirrors xochitl's
+// portrait-inverted scene rotation, which the raw marker never passes through
+// (see `orient.rs`).
 const FLIP_X: bool = false;
 const FLIP_Y: bool = false;
 
@@ -87,6 +90,7 @@ pub struct Pen {
     rubber: bool,      // eraser end (BTN_TOOL_RUBBER) in proximity
     prox: bool,        // either end reported in proximity (hovering)
     activity: bool,    // any marker traffic since the last take_activity()
+    flip180: bool,     // scene is portrait-inverted: point-mirror every sample
     pub dev_path: String,
 }
 
@@ -117,6 +121,7 @@ impl Pen {
             rubber: false,
             prox: false,
             activity: false,
+            flip180: false,
             dev_path,
         })
     }
@@ -158,9 +163,16 @@ impl Pen {
         self.grabbed
     }
 
+    /// Track the scene rotation (see `orient.rs`). Point-mirroring both axes IS
+    /// the 180° rotation, so ink lands under the physical pen tip again once the
+    /// host composites the buffer rotated.
+    pub fn set_flip180(&mut self, flip: bool) {
+        self.flip180 = flip;
+    }
+
     fn map_x(&self, raw: i32) -> i32 {
         let v = (raw.clamp(0, self.xmax) as i64 * PANEL_W as i64 / self.xmax as i64) as i32;
-        if FLIP_X {
+        if FLIP_X ^ self.flip180 {
             PANEL_W - 1 - v
         } else {
             v
@@ -168,7 +180,7 @@ impl Pen {
     }
     fn map_y(&self, raw: i32) -> i32 {
         let v = (raw.clamp(0, self.ymax) as i64 * PANEL_H as i64 / self.ymax as i64) as i32;
-        if FLIP_Y {
+        if FLIP_Y ^ self.flip180 {
             PANEL_H - 1 - v
         } else {
             v

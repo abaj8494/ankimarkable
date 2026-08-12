@@ -4,6 +4,7 @@
 pub mod backend;
 pub mod gesture;
 pub mod mathrender;
+pub mod orient;
 pub mod pen;
 pub mod qtfb;
 pub mod render;

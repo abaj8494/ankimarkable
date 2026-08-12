@@ -14,6 +14,7 @@ use anyhow::Result;
 
 use ankimarkable::backend::{self, Backend, Counts, DeckInfo, Stats, SyncReport};
 use ankimarkable::gesture::{CardGesture, CardTouch};
+use ankimarkable::orient::OrientTracker;
 use ankimarkable::pen::Pen;
 use ankimarkable::qtfb::{
     Qtfb, INPUT_TOUCH_PRESS, INPUT_TOUCH_RELEASE, INPUT_TOUCH_UPDATE, REFRESH_MODE_CONTENT,
@@ -100,6 +101,19 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
             None
         }
     };
+
+    // The host composites our buffer rotated when xochitl's scene is
+    // portrait-inverted (and pre-transforms the QTFB touch stream to match), but
+    // the raw-evdev marker bypasses that — so the pen frame must track the scene
+    // orientation or ink lands point-mirrored (see orient.rs).
+    let mut orient = OrientTracker::new();
+    if let Some(p) = pen.as_mut() {
+        p.set_flip180(orient.flip180());
+    }
+    eprintln!(
+        "ankimarkable: orientation {}",
+        if orient.flip180() { "portrait-inverted" } else { "portrait" }
+    );
 
     // App opens on the Home screen: a collapsible deck tree + streak.
     let mut screen = Screen::Home;
@@ -205,6 +219,20 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
             if let Some(p) = pen.as_mut() {
                 p.set_grab(!open);
             }
+        }
+        // Track the scene orientation (rate-limited internally). A confirmed
+        // flip re-frames the pen; any stroke supposedly in flight is stale (the
+        // tablet was just physically rotated), so close it rather than let its
+        // tail tear across the mirrored frame.
+        if let Some(flip) = orient.poll() {
+            if let Some(p) = pen.as_mut() {
+                p.set_flip180(flip);
+            }
+            wb.end_stroke();
+            eprintln!(
+                "ankimarkable: orientation → {}",
+                if flip { "portrait-inverted" } else { "portrait" }
+            );
         }
         // Flush any pending ink FIRST (non-blocking; keeps the dirty region if the
         // e-ink server is still busy). Retrying at the loop top means a deferred

@@ -36,13 +36,16 @@ on the pen whiteboard before revealing.*
   your ink scrolls with the card). Pinch snaps between 1.0×/1.25×/1.5×/2.0× with
   a real reflow — text gets bigger *and rewraps to the card width*, so nothing
   hangs off-screen. One finger on the card still does nothing (palm safety).
+  The zoom step you settle on is remembered: every later card (and the answer
+  side) opens at that level, across relaunches too.
 - **Home screen** — collapsible deck tree with due counts, review streak, and
   tap-to-review any deck.
 - **Colour ↔ black-and-white toggle** — tap the deck counts (top-left) to flip
   the whole frame between full colour and desaturated grayscale. Colour is great
   for image-heavy decks; B&W renders text crisper on e-ink and avoids the colour
-  panel's slower settle. The mode persists as you review and is unmissable when
-  toggled (the grade bar changes with it — see the screenshots above).
+  panel's slower settle. The mode is remembered across cards *and* relaunches,
+  and is unmissable when toggled (the grade bar changes with it — see the
+  screenshots above).
 - **Review chrome** — new/learning/review counts with an underline marking the
   current card's queue; Undo (strokes first, then the last grade); an overflow menu
   for **bury card / suspend note**; colour-e-ink-aware refresh (fast mono inking +
@@ -79,6 +82,10 @@ container — see `tools/mathpng/mathpng-build.sh`.
 | `ANKIMARKABLE_DECK` | `uni` | initial deck scope |
 | `AM_MATHPNG` | `/home/root/.ankimarkable/bin/mathpng` | math helper binary |
 | `AM_MATHPNG_RES` | `/home/root/.ankimarkable/microtex-res` | MicroTeX res fonts |
+
+Remembered settings (colour/B&W mode, zoom step) live in
+`/home/root/.ankimarkable/prefs`, a two-line `key=value` file written atomically
+on every change; delete it to reset to colour at 1.0×.
 
 ## License
 

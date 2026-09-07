@@ -19,8 +19,9 @@ use ankimarkable::pen::Pen;
 use ankimarkable::qtfb::{
     Qtfb, INPUT_TOUCH_PRESS, INPUT_TOUCH_RELEASE, INPUT_TOUCH_UPDATE, REFRESH_MODE_CONTENT,
 };
-use ankimarkable::render::{CardView, Renderer};
+use ankimarkable::render::{CardView, Renderer, ZOOM_STEPS};
 use ankimarkable::ui::{self, Hit, HomeHit, MenuState, Phase};
+use ankimarkable::prefs::Prefs;
 use ankimarkable::whiteboard::Whiteboard;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -163,7 +164,16 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
     let mut counts = Counts::default();
     let mut current: Option<backend::ReviewCard> = None;
     let mut menu = MenuState::Closed; // ⋮ overflow menu (Flag… / Bury / Suspend)
-    let mut mono = false; // false = colour card rendering, true = black-and-white
+    // Persisted preferences: colour vs black-and-white rendering and the zoom
+    // step every card opens at. Loaded here, saved whenever either changes, so
+    // both survive the next card AND the next launch.
+    let prefs_path = std::path::PathBuf::from(format!("{DATA_DIR}/prefs"));
+    let mut prefs = Prefs::load(&prefs_path);
+    eprintln!(
+        "ankimarkable: prefs {} zoom={}x",
+        if prefs.mono { "black-and-white" } else { "colour" },
+        ZOOM_STEPS[prefs.zoom_idx]
+    );
     // Live scrollable/zoomable card document (None until a card is shown).
     let mut view: Option<CardView> = None;
     // Two-finger scroll/pinch recognition over the QTFB touch stream.
@@ -255,7 +265,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                 // mode there's no colour to restore, so it would be a pointless flash
                 // after every writing pause — drop it (also clears needs_settle() so
                 // the loop returns to its idle poll cadence).
-                if mono {
+                if prefs.mono {
                     wb.discard_settle();
                 } else {
                     wb.settle_color(&mut qtfb);
@@ -407,7 +417,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                         &renderer,
                                         menu,
                                         current.as_ref().map_or(0, |c| c.flags),
-                                        mono,
+                                        prefs.mono,
                                     );
                                     wb.set_view(v.scroll_css() as f32, v.zoom() as f32);
                                     wb.blit_band_fast(&mut qtfb);
@@ -426,6 +436,10 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                             if dir != 0 {
                                 if let Some(v) = view.as_mut() {
                                     if v.set_zoom_step(dir) {
+                                        // The level you pinched to is the new
+                                        // default for every later card.
+                                        prefs.zoom_idx = v.zoom_idx();
+                                        prefs.save_or_warn(&prefs_path);
                                         // Re-anchor the ink to the new scroll/zoom
                                         // BEFORE the band blit so it ships one frame.
                                         wb.set_view(v.scroll_css() as f32, v.zoom() as f32);
@@ -442,7 +456,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                             &renderer,
                                             menu,
                                             current.as_ref().map_or(0, |c| c.flags),
-                                            mono,
+                                            prefs.mono,
                                         );
                                         // Fast feedback now; the queued colour settle
                                         // makes it crisp ~500ms after the gesture.
@@ -482,7 +496,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         wb.clear_ink();
                         invalidate_view(&mut view, &mut wb);
                         screen = Screen::Review;
-                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                     }
                 }
                 HomeHit::Toggle(i) => {
@@ -609,7 +623,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     wb.clear_ink();
                     invalidate_view(&mut view, &mut wb);
                 }
-                redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
             }
             Screen::Review => match ui::hit_test(ev.x, ev.y, phase) {
                 Hit::Exit => break 'main,
@@ -657,14 +671,14 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     phase = Phase::Question;
                     wb.clear_ink();
                     invalidate_view(&mut view, &mut wb);
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                 }
                 Hit::ShowAnswer => {
                     if current.is_some() && phase == Phase::Question {
                         phase = Phase::Answer;
                         invalidate_view(&mut view, &mut wb);
                         // Keep ink so you can compare your answer against the card.
-                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                     }
                 }
                 Hit::Grade(g) => {
@@ -680,7 +694,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         phase = Phase::Question;
                         wb.clear_ink(); // next card starts on a clean whiteboard
                         invalidate_view(&mut view, &mut wb);
-                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                        redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                     }
                 }
                 Hit::Undo => {
@@ -697,7 +711,7 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                                 invalidate_view(&mut view, &mut wb);
                                 redraw(
                                     &mut qtfb, &renderer, &mut wb, &current, &mut view, phase,
-                                    counts, &status, menu, mono,
+                                    counts, &status, menu, &prefs,
                                 );
                             }
                             _ => {} // nothing to undo
@@ -708,17 +722,18 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                 Hit::EraserToggle => {
                     wb.toggle_eraser();
                     // Recompose so the toolbar reflects the toggle; ink is kept.
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                 }
                 Hit::Menu => {
                     // Open the ⋮ overflow menu (Flag… / Bury card / Suspend note).
                     menu = MenuState::Root;
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                 }
                 Hit::ColorToggle => {
                     // Tap the counts (top-left) to flip colour / black-and-white.
-                    mono = !mono;
-                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, mono);
+                    prefs.mono = !prefs.mono;
+                    prefs.save_or_warn(&prefs_path);
+                    redraw(&mut qtfb, &renderer, &mut wb, &current, &mut view, phase, counts, &status, menu, &prefs);
                 }
                 Hit::None => {}
             },
@@ -747,9 +762,10 @@ fn redraw(
     counts: Counts,
     status: &str,
     menu: MenuState,
-    mono: bool,
+    prefs: &Prefs,
 ) {
     let eraser = wb.eraser;
+    let mono = prefs.mono;
     let frame = match current {
         Some(card) => {
             let html = match phase {
@@ -757,8 +773,17 @@ fn redraw(
                 Phase::Answer => &card.answer_html,
             };
             if view.is_none() {
-                *view =
-                    Some(renderer.build_card_view(html, ui::WIDTH as u32, ui::CARD_H as u32));
+                // Lay the card out at the persisted zoom step, and re-anchor the
+                // whiteboard to it so ink that survives a phase flip (question →
+                // answer) replays at the same scale the card is drawn at.
+                let v = renderer.build_card_view_at(
+                    html,
+                    ui::WIDTH as u32,
+                    ui::CARD_H as u32,
+                    prefs.zoom_idx,
+                );
+                wb.set_view(v.scroll_css() as f32, v.zoom() as f32);
+                *view = Some(v);
             }
             let v = view.as_ref().unwrap();
             let mut window = v.paint_window();

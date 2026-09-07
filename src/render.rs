@@ -125,6 +125,13 @@ impl Renderer {
     /// stays resident so scrolling is a repaint (no re-layout) and zoom is a real
     /// reflow (text re-wraps to the card width at the new scale).
     pub fn build_card_view(&self, html: &str, width: u32, height: u32) -> CardView {
+        self.build_card_view_at(html, width, height, 0)
+    }
+
+    /// `build_card_view` laid out directly at `ZOOM_STEPS[zoom_idx]` — the
+    /// persisted zoom preference, so every card opens at the level you last
+    /// pinched to instead of snapping back to 1.0×.
+    pub fn build_card_view_at(&self, html: &str, width: u32, height: u32, zoom_idx: usize) -> CardView {
         let doc = self.build_document(html, width, height);
         let mut view = CardView {
             doc,
@@ -133,6 +140,10 @@ impl Renderer {
             zoom_idx: 0,
         };
         view.refresh_content_size();
+        let zoom_idx = zoom_idx.min(ZOOM_STEPS.len() - 1);
+        if zoom_idx != 0 {
+            view.apply_zoom(zoom_idx, 0.0);
+        }
         view
     }
 }
@@ -156,6 +167,11 @@ pub struct CardView {
 impl CardView {
     pub fn zoom(&self) -> f32 {
         ZOOM_STEPS[self.zoom_idx]
+    }
+
+    /// Index into `ZOOM_STEPS` of the current zoom level.
+    pub fn zoom_idx(&self) -> usize {
+        self.zoom_idx
     }
 
     /// Content height in PHYSICAL px at the current zoom.
@@ -207,6 +223,13 @@ impl CardView {
         } else {
             0.0
         };
+        self.apply_zoom(new_idx, frac);
+        true
+    }
+
+    /// Reflow at `ZOOM_STEPS[new_idx]` and scroll to `frac` of the new content
+    /// height (0.0 = top). Shared by the pinch step and the persisted-zoom build.
+    fn apply_zoom(&mut self, new_idx: usize, frac: f64) {
         self.zoom_idx = new_idx;
         let mut vp = Viewport::new(self.width, self.height, 1.0, ColorScheme::Light);
         vp.set_zoom(ZOOM_STEPS[new_idx]);
@@ -218,7 +241,6 @@ impl CardView {
         let target_css = (frac * self.content_h()) / scale;
         self.doc.scroll_viewport_by(0.0, 1.0e9); // clamp to top
         self.doc.scroll_viewport_by(0.0, -target_css); // clamped downward move
-        true
     }
 
     /// Paint the current window (width×height at the current scroll/zoom) to RGBA.

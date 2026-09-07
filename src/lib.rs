@@ -6,6 +6,7 @@ pub mod gesture;
 pub mod mathrender;
 pub mod orient;
 pub mod pen;
+pub mod prefs;
 pub mod qtfb;
 pub mod render;
 pub mod ui;

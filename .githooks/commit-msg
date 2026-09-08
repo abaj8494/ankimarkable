@@ -1,10 +1,12 @@
 #!/bin/sh
 # Reject commit messages carrying AI/co-author attribution (see CLAUDE.md).
 # Enable: git config core.hooksPath .githooks
-msg="$1"
-if grep -Eiq '^[[:space:]]*(co-authored-by|claude-session)[[:space:]]*:|claude|anthropic|generated with' "$msg"; then
+# Matches trailers, "generated with … claude", "anthropic", and the word
+# "claude" except as part of a path like .claude/ (comment lines ignored).
+pat='^[[:space:]]*(co-authored-by|claude-session)[[:space:]]*:|generated with.*claude|anthropic|(^|[^./])claude([^-]|$)'
+if grep -v '^#' "$1" | grep -Eiq "$pat"; then
   echo "commit-msg: rejected — message contains co-author/AI attribution (see CLAUDE.md)" >&2
-  grep -Ein '^[[:space:]]*(co-authored-by|claude-session)[[:space:]]*:|claude|anthropic|generated with' "$msg" >&2
+  grep -v '^#' "$1" | grep -Ein "$pat" >&2
   exit 1
 fi
 exit 0

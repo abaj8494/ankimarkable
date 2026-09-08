@@ -1,10 +1,14 @@
-# ankimarkable
+# ankimarkable — Anki for the reMarkable Paper Pro
 
 A native **Anki review client for the reMarkable Paper Pro** — Anki's real Rust
 backend (`rslib`), genuine AnkiWeb sync, full HTML/CSS card rendering, LaTeX math,
 and an AnkiDroid-style **pen whiteboard** so you write your answer before revealing
 it. Ships as a standalone [AppLoad](https://github.com/asivery/rm-appload) app: no
 xochitl injection, no boot-bank risk.
+
+A ready-to-install bundle (binary + math helper + fonts + manual) is sold at
+[bazaar.abaj.ai/p/ankimarkable](https://bazaar.abaj.ai/p/ankimarkable); building from
+this source is and always will be possible.
 
 <p align="center">
   <img src="docs/side-by-side.png" width="96%" alt="Left: colour-mode review screen — HMM card with inline LaTeX, deck counts with active-queue underline, coloured grade bar. Right: black-and-white mode — a handwritten F-statistic worked on the pen whiteboard over the card, grade bar desaturated.">
@@ -94,5 +98,5 @@ on every change; delete it to reset to colour at 1.0×.
 `tools/mathpng` builds against MIT-licensed MicroTeX; bundled fonts are OFL/MIT.
 
 A ready-made binary bundle is sold at
-[bazaar.abaj.ai](https://bazaar.abaj.ai/remarkable) — buying it funds development;
+[bazaar.abaj.ai/p/ankimarkable](https://bazaar.abaj.ai/p/ankimarkable) — buying it funds development;
 building from this source yourself is and will always be possible.

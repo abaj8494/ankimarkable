@@ -25,7 +25,7 @@ use blitz_html::HtmlDocument;
 use blitz_paint::paint_scene;
 use blitz_traits::net::{BoxedHandler, Bytes, NetProvider, Request, SharedCallback};
 use blitz_traits::shell::{ColorScheme, Viewport};
-use parley::fontique::{Blob, GenericFamily, Script};
+use parley::fontique::{Blob, FontInfoOverride, GenericFamily, Script};
 use parley::FontContext;
 
 const F_SANS_REG: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
@@ -254,55 +254,140 @@ impl CardView {
     }
 }
 
-/// Embedded fonts registered, CSS generics mapped to Noto Sans/Mono, with
-/// Symbols2 + Emoji appended as fallbacks so any deck's `font-family` resolves
-/// and stray symbol/emoji glyphs render instead of tofu.
+/// Family names decks ask for that we don't ship, mapped onto the font we do.
+///
+/// parley drops a named family it can't find (`arial` → nothing), and Anki's
+/// stock notetype CSS is `.card { font-family: arial; }`. Registering the Noto
+/// faces again under these names (same bytes — `Blob` is shared, not copied)
+/// makes such a card resolve to the real family, with bold/italic matching
+/// intact, instead of falling through to the glyph-fallback chain.
+const SANS_ALIASES: &[&str] = &[
+    "arial", "helvetica", "helvetica neue", "verdana", "tahoma", "segoe ui", "calibri",
+    "trebuchet ms", "roboto", "open sans", "lato", "ubuntu", "dejavu sans", "liberation sans",
+    "arial unicode ms", "lucida grande", "lucida sans unicode", "gill sans", "optima",
+    "avenir", "avenir next", "futura", "inter", "source sans pro", "fira sans", "nunito",
+    "montserrat", "raleway", "pt sans", "droid sans", "san francisco", "sf pro text",
+    "sf pro display", "-apple-system", "blinkmacsystemfont",
+    // Serif names map here too: we ship no serif, and the `serif` generic already
+    // resolves to Noto Sans. Better the right glyphs in sans than fallback soup.
+    "times", "times new roman", "georgia", "cambria", "garamond", "palatino",
+    "palatino linotype", "book antiqua", "baskerville", "dejavu serif", "liberation serif",
+    "noto serif", "pt serif", "merriweather", "droid serif", "charter", "constantia",
+];
+const MONO_ALIASES: &[&str] = &[
+    "courier", "courier new", "consolas", "menlo", "monaco", "lucida console", "andale mono",
+    "dejavu sans mono", "liberation mono", "source code pro", "fira code", "fira mono",
+    "jetbrains mono", "ubuntu mono", "roboto mono", "inconsolata", "sf mono", "cascadia code",
+    "cascadia mono", "droid sans mono", "noto sans mono", "hack", "iosevka",
+];
+
+/// Embedded fonts registered, CSS generics mapped to Noto Sans/Mono, common
+/// deck font names aliased onto them, and Noto Sans + the symbol fonts installed
+/// as the glyph-fallback chain so any deck's `font-family` resolves and stray
+/// symbol/emoji/Greek glyphs render instead of tofu.
 fn build_font_ctx() -> FontContext {
     let mut fcx = FontContext::new();
 
+    // One shared Blob per face; aliases re-register the same bytes under another
+    // family name without copying them.
+    let sans_blobs: Vec<Blob<u8>> = [F_SANS_REG, F_SANS_BOLD, F_SANS_IT, F_SANS_BIT]
+        .iter()
+        .map(|b| Blob::from(b.to_vec()))
+        .collect();
+    let mono_blob = Blob::from(F_MONO.to_vec());
+
     let mut sans_ids = Vec::new();
-    for bytes in [F_SANS_REG, F_SANS_BOLD, F_SANS_IT, F_SANS_BIT] {
-        for (fam, _) in fcx
-            .collection
-            .register_fonts(Blob::from(bytes.to_vec()), None)
-        {
-            sans_ids.push(fam);
+    for blob in &sans_blobs {
+        for (fam, _) in fcx.collection.register_fonts(blob.clone(), None) {
+            if !sans_ids.contains(&fam) {
+                sans_ids.push(fam);
+            }
         }
     }
     let mut mono_ids = Vec::new();
-    for (fam, _) in fcx
-        .collection
-        .register_fonts(Blob::from(F_MONO.to_vec()), None)
-    {
+    for (fam, _) in fcx.collection.register_fonts(mono_blob.clone(), None) {
         mono_ids.push(fam);
     }
-    let mut fallback_ids = Vec::new();
-    for bytes in [F_SYMBOLS, F_EMOJI, F_NERD, F_XITS] {
+    for alias in SANS_ALIASES {
+        let over = FontInfoOverride {
+            family_name: Some(alias),
+            ..Default::default()
+        };
+        for blob in &sans_blobs {
+            fcx.collection.register_fonts(blob.clone(), Some(over));
+        }
+    }
+    for alias in MONO_ALIASES {
+        let over = FontInfoOverride {
+            family_name: Some(alias),
+            ..Default::default()
+        };
+        fcx.collection.register_fonts(mono_blob.clone(), Some(over));
+    }
+
+    let mut symbol_ids = Vec::new();
+    let mut emoji_ids = Vec::new();
+    let mut math_ids = Vec::new();
+    for (i, bytes) in [F_SYMBOLS, F_EMOJI, F_NERD, F_XITS].iter().enumerate() {
         for (fam, _) in fcx
             .collection
             .register_fonts(Blob::from(bytes.to_vec()), None)
         {
-            fallback_ids.push(fam);
+            symbol_ids.push(fam);
+            match i {
+                1 => emoji_ids.push(fam),
+                3 => math_ids.push(fam),
+                _ => {}
+            }
         }
     }
 
+    for g in [
+        GenericFamily::SansSerif,
+        GenericFamily::Serif,
+        GenericFamily::SystemUi,
+        GenericFamily::UiSansSerif,
+        GenericFamily::UiSerif,
+        GenericFamily::UiRounded,
+        GenericFamily::Cursive,
+        GenericFamily::Fantasy,
+    ] {
+        fcx.collection
+            .set_generic_families(g, sans_ids.iter().copied());
+    }
+    for g in [GenericFamily::Monospace, GenericFamily::UiMonospace] {
+        fcx.collection
+            .set_generic_families(g, mono_ids.iter().copied());
+    }
     fcx.collection
-        .set_generic_families(GenericFamily::SansSerif, sans_ids.iter().copied());
+        .set_generic_families(GenericFamily::Emoji, emoji_ids.iter().copied());
     fcx.collection
-        .set_generic_families(GenericFamily::Serif, sans_ids.iter().copied());
-    fcx.collection
-        .set_generic_families(GenericFamily::Monospace, mono_ids.iter().copied());
+        .set_generic_families(GenericFamily::Math, math_ids.iter().copied());
 
     // Glyph-level fallback: when a matched font lacks a glyph, parley queries
     // fontique for fallback families by the cluster's *script*. With no system
-    // fonts, the default (named) fallbacks resolve to nothing, so register our
-    // Symbols2 + Emoji on the scripts that carry stray glyphs (emoji, symbols,
-    // common punctuation/dingbats, math) plus Latin as a catch-all.
-    // `Zzzz` = Unknown script, which is what Private-Use-Area codepoints (Nerd Font
-    // icons) resolve to; include it so those get the Nerd Font fallback.
-    for tag in [b"Zsye", b"Zsym", b"Zyyy", b"Zmth", b"Latn", b"Zzzz"] {
+    // fonts, the default (named) fallbacks resolve to nothing, so we install our
+    // own chain on every script a card is likely to carry.
+    //
+    // Noto Sans leads the chain. When a deck names a family we neither ship nor
+    // alias, parley resolves NO family and draws every glyph from this chain —
+    // and the old chain started with Symbols2, whose Latin letters are Noto Sans
+    // outlines (so prose looked right) but whose digits are 1.1 em wide
+    // ("spaced-out numbers") and which has no Greek at all (β simply vanished,
+    // since Greek had no fallback registered). Leading with Noto Sans makes an
+    // unknown family render exactly like `sans-serif`; the symbol fonts still
+    // catch whatever Noto Sans lacks. `Zzzz` = Unknown script, which is what
+    // Private-Use-Area codepoints (Nerd Font icons) resolve to.
+    let chain: Vec<_> = sans_ids
+        .iter()
+        .chain(symbol_ids.iter())
+        .copied()
+        .collect();
+    for tag in [
+        b"Latn", b"Grek", b"Cyrl", b"Zyyy", b"Zinh", b"Zsye", b"Zsym", b"Zmth", b"Zzzz",
+    ] {
         fcx.collection
-            .append_fallbacks(Script(*tag), fallback_ids.iter().copied());
+            .append_fallbacks(Script(*tag), chain.iter().copied());
     }
 
     fcx

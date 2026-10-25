@@ -182,10 +182,11 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
     let mut phase = Phase::Question;
     let mut status = String::new();
 
-    ui::draw_home(
+    draw_home(
         &mut qtfb,
         &renderer,
-        &visible,
+        &mut backend,
+        &mut visible,
         scroll,
         home_stats(base_stats, session_reviews),
     );
@@ -507,10 +508,11 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                         }
                         visible = visible_decks(&all_decks, &collapsed);
                         clamp_scroll(&mut scroll, visible.len());
-                        ui::draw_home(
+                        draw_home(
                             &mut qtfb,
                             &renderer,
-                            &visible,
+                            &mut backend,
+                            &mut visible,
                             scroll,
                             home_stats(base_stats, session_reviews),
                         );
@@ -519,10 +521,11 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                 HomeHit::ScrollUp => {
                     let step = ui::home_page_rows().saturating_sub(1).max(1);
                     scroll = scroll.saturating_sub(step);
-                    ui::draw_home(
+                    draw_home(
                         &mut qtfb,
                         &renderer,
-                        &visible,
+                        &mut backend,
+                        &mut visible,
                         scroll,
                         home_stats(base_stats, session_reviews),
                     );
@@ -531,10 +534,11 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     let step = ui::home_page_rows().saturating_sub(1).max(1);
                     let max_scroll = visible.len().saturating_sub(ui::home_page_rows());
                     scroll = (scroll + step).min(max_scroll);
-                    ui::draw_home(
+                    draw_home(
                         &mut qtfb,
                         &renderer,
-                        &visible,
+                        &mut backend,
+                        &mut visible,
                         scroll,
                         home_stats(base_stats, session_reviews),
                     );
@@ -565,10 +569,11 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     all_decks = backend.deck_infos().unwrap_or_default();
                     visible = visible_decks(&all_decks, &collapsed);
                     clamp_scroll(&mut scroll, visible.len());
-                    ui::draw_home(
+                    draw_home(
                         &mut qtfb,
                         &renderer,
-                        &visible,
+                        &mut backend,
+                        &mut visible,
                         scroll,
                         home_stats(base_stats, session_reviews),
                     );
@@ -636,10 +641,11 @@ fn run(mut qtfb: Qtfb) -> Result<()> {
                     visible = visible_decks(&all_decks, &collapsed);
                     clamp_scroll(&mut scroll, visible.len());
                     wb.clear_ink();
-                    ui::draw_home(
+                    draw_home(
                         &mut qtfb,
                         &renderer,
-                        &visible,
+                        &mut backend,
+                        &mut visible,
                         scroll,
                         home_stats(base_stats, session_reviews),
                     );
@@ -811,6 +817,21 @@ fn redraw(
 fn invalidate_view(view: &mut Option<CardView>, wb: &mut Whiteboard) {
     *view = None;
     wb.set_view(0.0, 1.0);
+}
+
+/// Draw the Home page at `scroll`, first giving its rows their in-deck counts.
+fn draw_home(
+    qtfb: &mut Qtfb,
+    renderer: &Renderer,
+    backend: &mut Backend,
+    visible: &mut [DeckInfo],
+    scroll: usize,
+    stats: backend::Stats,
+) {
+    let start = scroll.min(visible.len());
+    let end = (scroll + ui::home_page_rows()).min(visible.len());
+    backend.page_counts(&mut visible[start..end]);
+    ui::draw_home(qtfb, renderer, visible, scroll, stats);
 }
 
 /// Filter the full deck tree to the rows visible given the runtime collapse state:

@@ -19,7 +19,7 @@ use anki::sync::media::progress::MediaSyncProgress;
 use anki::template::RenderedNode;
 use anki::timestamp::{TimestampMillis, TimestampSecs};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The four Anki grades, in button order.
@@ -40,7 +40,8 @@ pub struct Counts {
 }
 
 /// A deck row for the home screen's collapsible tree. `name` is the leaf component
-/// (indent by `level`); counts include subdecks (Anki's deck-list numbers).
+/// (indent by `level`); counts include subdecks. They start as Anki's deck-list
+/// numbers and `Backend::page_counts` swaps in the in-deck ones (`queued`).
 /// `collapsed` starts from Anki's stored state and is then toggled at runtime.
 #[derive(Clone, Debug)]
 pub struct DeckInfo {
@@ -52,6 +53,7 @@ pub struct DeckInfo {
     pub new: u32,
     pub learn: u32,
     pub review: u32,
+    pub queued: bool,
 }
 
 /// Review stats for the home screen.
@@ -109,6 +111,9 @@ pub struct Backend {
     col_path: String,
     // Turns `[latex]`/`[$]` SVGs + MathJax `\(...\)` in card HTML into `<img>` PNGs.
     math: crate::mathrender::MathRenderer,
+    // In-deck counts per deck, valid while the deck's tree counts and the
+    // scheduler day are unchanged (see `page_counts`). Cleared by sync.
+    queue_cache: HashMap<DeckId, (u32, [u32; 3], [u32; 3])>,
 }
 
 impl Backend {
@@ -123,6 +128,7 @@ impl Backend {
             col: Some(col),
             col_path: col_path.to_string(),
             math: crate::mathrender::MathRenderer::new(media_dir),
+            queue_cache: HashMap::new(),
         })
     }
 
@@ -202,6 +208,7 @@ impl Backend {
                 new: node.new_count,
                 learn: node.learn_count,
                 review: node.review_count,
+                queued: false,
             });
             let mut kids: Vec<_> = node.children.iter().collect();
             kids.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -209,10 +216,40 @@ impl Backend {
                 stack.push((kid, level + 1));
             }
         }
-        queue_counts(self.col(), &mut out)?;
         Ok(out)
     }
 
+
+    /// Swap the deck-list counts of `rows` (the Home page on screen) for the counts
+    /// the review screen shows on opening each deck. rslib's `deck_tree` counts
+    /// every due card, but the study queue buries siblings (one card per note, and
+    /// new cards whose note has a review due), so the two disagree. A queue costs
+    /// ~20 ms to build on the device, so only the page on screen is done, and a
+    /// result is reused while the deck's tree counts and the day are unchanged.
+    pub fn page_counts(&mut self, rows: &mut [DeckInfo]) {
+        let Ok(today) = self.col().timing_today().map(|t| t.days_elapsed) else {
+            return;
+        };
+        let mut todo = Vec::new();
+        for d in rows.iter_mut().filter(|d| !d.queued) {
+            let tree = [d.new, d.learn, d.review];
+            match self.queue_cache.get(&d.id) {
+                Some(&(day, t, q)) if day == today && t == tree => {
+                    [d.new, d.learn, d.review] = q;
+                    d.queued = true;
+                }
+                _ => todo.push(d),
+            }
+        }
+        for d in todo {
+            let tree = [d.new, d.learn, d.review];
+            if let Ok(q) = queue_counts(self.col(), d.id, tree) {
+                self.queue_cache.insert(d.id, (today, tree, q));
+                [d.new, d.learn, d.review] = q;
+                d.queued = true;
+            }
+        }
+    }
 
     pub fn counts(&mut self) -> Result<Counts> {
         // fetch_limit 0 → no cards materialised, but counts still come from the queue.
@@ -338,6 +375,8 @@ impl Backend {
     /// freshly-provisioned device fetch the `uni` deck on first sync.
     pub fn sync(&mut self, username: &str, password: &str) -> Result<SyncReport> {
         use anki::services::CollectionService; // for latest_progress()
+        // A sync can change cards or deck options without moving tree counts.
+        self.queue_cache.clear();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -554,35 +593,22 @@ fn stats_from_db(path: &str) -> Result<Stats> {
     })
 }
 
-/// Replace each row's deck-tree counts with the counts the review screen will show
-/// on opening that deck. rslib's `deck_tree` counts every due card, but the study
-/// queue buries siblings (one card per note, and new cards whose note has a review
-/// due), so the deck list ran higher than the in-deck counts. The queue is built
-/// for the current deck only, so each deck is selected in turn and the selection
-/// undone at once: undo history and the current deck end as they started, and the
-/// undo also drops the cached queue. Burying only lowers counts, so 0/0/0 rows are
-/// skipped.
-fn queue_counts(col: &mut Collection, decks: &mut [DeckInfo]) -> Result<()> {
-    let current = col.get_current_deck()?.id;
-    for d in decks.iter_mut() {
-        if d.new + d.learn + d.review == 0 {
-            continue;
-        }
-        let switched = d.id != current;
-        if switched {
-            col.set_current_deck(d.id)?;
-        }
-        let q = col.get_queued_cards(0, false);
-        if switched {
-            col.undo()?;
-        }
-        // A deck whose queue won't build keeps its tree counts rather than
-        // failing the whole deck list.
-        if let Ok(q) = q {
-            d.new = q.new_count as u32;
-            d.learn = q.learning_count as u32;
-            d.review = q.review_count as u32;
-        }
+/// The in-deck counts for `did`. The queue is built for the current deck only, so
+/// the deck is selected and the selection undone at once: undo history and the
+/// current deck end as they started, and the undo also drops the cached queue.
+/// Burying only lowers counts, so a 0/0/0 tree row needs no queue.
+fn queue_counts(col: &mut Collection, did: DeckId, tree: [u32; 3]) -> Result<[u32; 3]> {
+    if tree == [0, 0, 0] {
+        return Ok(tree);
     }
-    Ok(())
+    let switched = did != col.get_current_deck()?.id;
+    if switched {
+        col.set_current_deck(did)?;
+    }
+    let q = col.get_queued_cards(0, false);
+    if switched {
+        col.undo()?;
+    }
+    let q = q?;
+    Ok([q.new_count as u32, q.learning_count as u32, q.review_count as u32])
 }

@@ -108,7 +108,9 @@ fn main() -> anyhow::Result<()> {
 
     // Home screen (collapsible deck tree, rendered fully expanded from row 0).
     {
-        let decks = be.deck_infos()?;
+        let mut decks = be.deck_infos()?;
+        let page = ui::home_page_rows().min(decks.len());
+        be.page_counts(&mut decks[..page]);
         println!("home: {} decks, streak={} today={}", decks.len(), stats.streak, stats.reviewed_today);
         let home = ui::compose_home(&r, &decks, 0, stats);
         save_png("/home/root/screen_home.png", &home, ui::WIDTH, ui::HEIGHT)?;

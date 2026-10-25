@@ -209,6 +209,7 @@ impl Backend {
                 stack.push((kid, level + 1));
             }
         }
+        queue_counts(self.col(), &mut out)?;
         Ok(out)
     }
 
@@ -551,4 +552,37 @@ fn stats_from_db(path: &str) -> Result<Stats> {
         streak,
         reviewed_today,
     })
+}
+
+/// Replace each row's deck-tree counts with the counts the review screen will show
+/// on opening that deck. rslib's `deck_tree` counts every due card, but the study
+/// queue buries siblings (one card per note, and new cards whose note has a review
+/// due), so the deck list ran higher than the in-deck counts. The queue is built
+/// for the current deck only, so each deck is selected in turn and the selection
+/// undone at once: undo history and the current deck end as they started, and the
+/// undo also drops the cached queue. Burying only lowers counts, so 0/0/0 rows are
+/// skipped.
+fn queue_counts(col: &mut Collection, decks: &mut [DeckInfo]) -> Result<()> {
+    let current = col.get_current_deck()?.id;
+    for d in decks.iter_mut() {
+        if d.new + d.learn + d.review == 0 {
+            continue;
+        }
+        let switched = d.id != current;
+        if switched {
+            col.set_current_deck(d.id)?;
+        }
+        let q = col.get_queued_cards(0, false);
+        if switched {
+            col.undo()?;
+        }
+        // A deck whose queue won't build keeps its tree counts rather than
+        // failing the whole deck list.
+        if let Ok(q) = q {
+            d.new = q.new_count as u32;
+            d.learn = q.learning_count as u32;
+            d.review = q.review_count as u32;
+        }
+    }
+    Ok(())
 }
